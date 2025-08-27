@@ -1,4 +1,3 @@
 .specstory
 .env*
 !.env*.example
-
