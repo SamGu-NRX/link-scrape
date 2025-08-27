@@ -1,0 +1,4 @@
+.specstory
+.env*
+!.env*.example
+
