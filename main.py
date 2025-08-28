@@ -1,22 +1,21 @@
 import time
 import pandas as pd
 import re
-# Removed: import keyboard (due to bus error)
-
+import csv
+import threading
+import sys
+import os
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import StaleElementReferenceException
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 
 # Set up Selenium with Chrome
 options = Options()
 # NON-HEADLESS for manual login (visible browser)
-# options.add_argument("--headless")  # Uncomment for background mode AFTER testing
+# options.add_argument("--headless")  # Uncomment to run headless (saves memory)
 options.add_argument("--no-sandbox")
 options.add_argument("--disable-dev-shm-usage")
 options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")  # Updated UA for 2025
@@ -31,136 +30,139 @@ def manual_login():
     print("Browser opened to LinkedIn login page. Please log in manually (enter credentials, solve CAPTCHA if needed).")
     input("Press Enter in this terminal AFTER you've logged in and the page has loaded...")
 
-def interactive_menu(profile_name):
-    """Provides a blocking interactive menu for the user."""
-    print(f"\n--- Finished scraping {profile_name} ---")
-    print("   's' + Enter: Skip to the next profile")
-    print("   'q' + Enter: Quit the script entirely")
-    choice = input("Press Enter to continue to the next profile, or choose an option: ").strip().lower()
+# Global flag for pause/resume/skip/quit
+control_command = None
+lock = threading.Lock()
 
-    if choice == 's':
-        return 'skip'
-    elif choice == 'q':
-        return 'quit'
+def listen_for_commands():
+    global control_command
+    while True:
+        cmd = input().strip().lower()
+        with lock:
+            control_command = cmd
+        if cmd == 'q':
+            print("Quitting and restarting from beginning...")
+            driver.quit()
+            sys.exit(0)  # Exit to restart (re-run script manually)
+
+# Start listener thread
+listener_thread = threading.Thread(target=listen_for_commands, daemon=True)
+listener_thread.start()
+
+print("Command listener started. Type 'p' + Enter to pause, 'r' to resume, 's' to skip profile, 'q' to quit/restart.")
+
+def check_control():
+    global control_command
+    with lock:
+        cmd = control_command
+        control_command = None  # Reset
+    if cmd == 'p':
+        print("Paused. Type 'r' + Enter to resume or 's' to skip.")
+        while True:
+            time.sleep(0.1)
+            with lock:
+                resume_cmd = control_command
+                control_command = None
+            if resume_cmd == 'r':
+                print("Resuming...")
+                return 'resume'
+            elif resume_cmd == 's':
+                print("Skipping...")
+                return 'skip'
+            elif resume_cmd == 'q':
+                return 'quit'
     return 'continue'
 
-def scroll_gradually_until_end(url):
-    """Navigates to the URL and scrolls gradually down the page until no new content loads."""
+def gradual_scroll_and_parse_incrementally(url, csv_filename, seen):
     driver.get(url)
-    time.sleep(3)  # Initial load for the page content
+    time.sleep(3)  # Initial load
 
-    last_height = driver.execute_script("return document.body.scrollHeight")
-    no_change_attempts = 0
-    max_no_change_attempts = 5 # How many times we try without new content before giving up
-    scroll_increment = 500 # Pixels to scroll each time
+    current_height = 0
+    total_height = driver.execute_script("return document.body.scrollHeight")
+    step_count = 0
+    chunk_size = 10  # Parse every 10 steps to save memory
 
-    print("Starting gradual scroll...")
-    while no_change_attempts < max_no_change_attempts:
-        # Scroll down by a fixed increment
-        driver.execute_script(f"window.scrollBy(0, {scroll_increment});")
-        time.sleep(1 + (no_change_attempts * 0.5)) # Variable delay (1s to 3.5s)
-
-        new_height = driver.execute_script("return document.body.scrollHeight")
-
-        if new_height == last_height:
-            no_change_attempts += 1
-            print(f"No new content loaded. Attempt {no_change_attempts}/{max_no_change_attempts}.")
-            time.sleep(2) # Extra wait for very slow loads
-        else:
-            last_height = new_height
-            no_change_attempts = 0 # Reset counter as new content was found
-            print(f"New content loaded. Current height: {last_height}px")
-
-    print("Reached end of scrollable content (or max no-change attempts reached).")
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);") # Ensure truly at bottom
-    time.sleep(3) # Final wait for any last-minute rendering
-
-    print("Double-checking: Scrolling back to top and down gradually again.")
-    driver.execute_script("window.scrollTo(0, 0);") # Scroll to top
-    time.sleep(2) # Wait for page to settle at top
-
-    # Perform the second full gradual scroll down
-    last_height = driver.execute_script("return document.body.scrollHeight")
-    no_change_attempts = 0
-    while no_change_attempts < max_no_change_attempts:
-        driver.execute_script(f"window.scrollBy(0, {scroll_increment});")
-        time.sleep(1 + (no_change_attempts * 0.5)) # Variable delay
-
-        new_height = driver.execute_script("return document.body.scrollHeight")
-
-        if new_height == last_height:
-            no_change_attempts += 1
-            print(f"Double-check: No new content. Attempt {no_change_attempts}/{max_no_change_attempts}.")
-            time.sleep(2)
-        else:
-            last_height = new_height
-            no_change_attempts = 0
-            print(f"Double-check: New content. Current height: {last_height}px")
-
-    print("Double-check scroll complete.")
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);") # Ensure truly at bottom
-    time.sleep(3) # Final wait
-    return True
-
-def extract_posts_from_source(page_source):
-    """Parses the page source and extracts post data."""
-    soup = BeautifulSoup(page_source, 'html.parser')
-    post_elements = soup.find_all('div', class_=['feed-shared-update-v2', 'update-components-article'])
-
-    posts = []
-    for post in post_elements:
+    while current_height < total_height:
         try:
-            # Extract text (preserve newlines)
-            text_elem = post.find('div', class_='update-components-text') or post.find('span', class_='break-words')
-            text = text_elem.get_text(separator='\n', strip=True) if text_elem else 'N/A'
+            driver.execute_script(f"window.scrollTo(0, {current_height});")
+            time.sleep(1 + (step_count % 3) * 0.3)  # Variable delay 1-1.9s for loading
 
-            # Extract date (e.g., "8h" or "2d")
-            date_elem = post.find('span', class_='update-components-actor__sub-description') or post.find('time')
-            date_text = date_elem.get_text(strip=True) if date_elem else 'N/A'
-            # Use regex to find relative time, e.g., "8h", "2d", "1w", "1mo", "1y"
-            date_match = re.search(r'^\d+[hwdmoy]', date_text)
-            date = date_match.group(0).strip() if date_match else date_text.split('•')[0].strip()
+            action = check_control()
+            if action == 'skip' or action == 'quit':
+                return seen  # Return current seen for partial save
 
-            # Extract likes (from reactions button)
-            likes_elem = post.find('span', class_='social-details-social-counts__reactions-count')
-            likes = likes_elem.get_text(strip=True).replace(',', '') if likes_elem else '0'  # Remove commas for numeric
+            current_height += 500
+            new_height = driver.execute_script("return document.body.scrollHeight")
+            print(f"Scrolled to height: {new_height}")
+            if new_height > total_height:
+                total_height = new_height
 
-            # Extract comments (specific to comments li)
-            comments_li = post.find('li', class_=lambda x: x and 'comments' in x)
-            comments_elem = comments_li.find('button') if comments_li else None
-            comments_text = comments_elem.get_text(strip=True) if comments_elem else '0 comments'
-            comments = re.search(r'\d+', comments_text).group(0) if re.search(r'\d+', comments_text) else '0'
+            step_count += 1
+            if step_count % chunk_size == 0:
+                # Incremental parse and save
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+                post_elements = soup.find_all('div', class_=['feed-shared-update-v2', 'update-components-article'])
 
-            # Extract reposts (specific to reposts li)
-            reposts_li = post.find('li', class_=lambda x: x and 'reposts' in x)
-            reposts_elem = reposts_li.find('button') if reposts_li else None
-            reposts_text = reposts_elem.get_text(strip=True) if reposts_elem else '0 reposts'
-            reposts = re.search(r'\d+', reposts_text).group(0) if re.search(r'\d+', reposts_text) else '0'
+                new_posts = []
+                for post in post_elements:
+                    try:
+                        text_elem = post.find('div', class_='update-components-text') or post.find('span', class_='break-words')
+                        text = text_elem.get_text(separator=' ', strip=True).replace('"', '`') if text_elem else 'N/A'
 
-            # Extract post URL
-            post_urn_match = re.search(r'urn:li:activity:(\d+)', str(post))
-            if post_urn_match:
-                post_id = post_urn_match.group(1)
-                post_url = f"https://www.linkedin.com/feed/update/urn:li:activity:{post_id}/"
-            else:
-                post_url_elem = post.find('a', class_='app-aware-link') or post.find('a', href=True)
-                post_url = post_url_elem['href'] if post_url_elem else 'N/A'
+                        date_elem = post.find('span', class_='update-components-actor__sub-description') or post.find('time')
+                        date_text = date_elem.get_text(strip=True) if date_elem else 'N/A'
+                        date = re.search(r'^\d+[hwdmoy]?', date_text).group(0).strip() if re.search(r'^\d+[hwdmoy]?', date_text) else date_text
 
+                        likes_elem = post.find('span', class_='social-details-social-counts__reactions-count')
+                        likes = likes_elem.get_text(strip=True).replace(',', '') if likes_elem else '0'
 
-            posts.append({
-                'text': text,
-                'date': date,
-                'likes': likes,
-                'comments': comments,
-                'reposts': reposts,
-                'url': post_url
-            })
+                        comments_li = post.find('li', class_=lambda x: x and 'comments' in x)
+                        comments_elem = comments_li.find('button') if comments_li else None
+                        comments_text = comments_elem.get_text(strip=True) if comments_elem else '0 comments'
+                        comments = re.search(r'\d+', comments_text).group(0) if re.search(r'\d+', comments_text) else '0'
+
+                        reposts_li = post.find('li', class_=lambda x: x and 'reposts' in x)
+                        reposts_elem = reposts_li.find('button') if reposts_li else None
+                        reposts_text = reposts_elem.get_text(strip=True) if reposts_elem else '0 reposts'
+                        reposts = re.search(r'\d+', reposts_text).group(0) if re.search(r'\d+', reposts_text) else '0'
+
+                        post_url_elem = post.find('a', class_='app-aware-link') or post.find('a', href=True)
+                        post_url = post_url_elem['href'] if post_url_elem else 'N/A'
+
+                        post_hash = (text, date, post_url)
+                        if post_hash not in seen:
+                            seen.add(post_hash)
+                            new_posts.append({
+                                'text': text,
+                                'date': date,
+                                'likes': likes,
+                                'comments': comments,
+                                'reposts': reposts,
+                                'url': post_url
+                            })
+                    except Exception as e:
+                        print(f"Error parsing post in chunk: {e}")
+
+                # Append new posts to CSV
+                if new_posts:
+                    os.makedirs(os.path.dirname(csv_filename), exist_ok=True) # Ensure data directory exists
+                    mode = 'a' if os.path.exists(csv_filename) else 'w'
+                    with open(csv_filename, mode, newline='', encoding='utf-8') as csvfile:
+                        writer = csv.DictWriter(csvfile, fieldnames=['text', 'date', 'likes', 'comments', 'reposts', 'url'], quoting=csv.QUOTE_MINIMAL)
+                        if mode == 'w':
+                            writer.writeheader()
+                        for post in new_posts:
+                            writer.writerow(post)
+                    print(f"Saved {len(new_posts)} new posts incrementally to {csv_filename}. Total unique: {len(seen)}")
+
         except Exception as e:
-            print(f"Error parsing a post: {e}")
+            print(f"Error during scrolling: {e}. Saving partial data...")
+            return seen  # Return seen for final count
 
-    return posts
+    print("Scrolling completed.")
+    return seen
 
-# Main script execution flow
+# Run the scraper
 try:
     manual_login()  # Login once
 
@@ -169,55 +171,26 @@ try:
         urls = [line.strip() for line in file if line.strip()]
 
     for url in urls:
-        # Extract profile name (e.g., "ken-cheng-991849b6" -> "ken_cheng_991849b6")
-        match = re.search(r'/in/([^/]+)', url)
-        if match:
-            profile_identifier = match.group(1)
-            profile_name = profile_identifier.replace('-', '_') # Keep full identifier for unique filename
-        else:
-            profile_name = 'unknown_profile'
+        # Extract profile name (improved: handle name and ID separately)
+        match = re.search(r'/in/([a-zA-Z0-9_-]+)-([a-zA-Z0-9]+)', url)
+        profile_name = match.group(1).replace('-', '_') if match else 'unknown'
+        csv_filename = f"data/{profile_name}_posts.csv" # Save to data/ subdirectory
+        print(f"Scraping posts for {profile_name} from {url}")
 
-        # Show interactive menu before processing each profile
-        menu_action = interactive_menu(profile_name)
-        if menu_action == 'skip':
-            print(f"Skipping {profile_name}.")
-            continue  # Move to the next URL
-        elif menu_action == 'quit':
-            print("Quitting script.")
-            break  # Exit the loop and finally quit driver
-
-        print(f"Starting to scrape posts for {profile_name} from {url}")
-
-        # Perform gradual scrolling and double-check
-        scroll_gradually_until_end(url)
-
-        # Extract posts from the fully scrolled page
-        posts_data = extract_posts_from_source(driver.page_source)
-
-        # De-dupe: Use a set to track unique posts (hash of text + date + url)
-        unique_posts = []
+        # Load existing seen hashes from CSV for resume/de-dupe
         seen = set()
-        for post in posts_data:
-            post_hash = (post['text'], post['date'], post['url'])
-            if post_hash not in seen:
-                seen.add(post_hash)
-                unique_posts.append(post)
+        if os.path.exists(csv_filename):
+            df_existing = pd.read_csv(csv_filename)
+            for _, row in df_existing.iterrows():
+                seen.add((row['text'], row['date'], row['url']))
+            print(f"Resuming from {len(seen)} existing unique posts.")
 
-        if not unique_posts:
-            print(f"No unique posts found for {profile_name}. Ensure the profile has activity or check selectors.")
-        else:
-            # Save to CSV
-            df = pd.DataFrame(unique_posts)
-            csv_filename = f"{profile_name}_posts.csv"
-            df.to_csv(csv_filename, index=False)
-            print(f"Scraped {len(unique_posts)} unique posts for {profile_name} and saved to {csv_filename}")
+        # Scroll and parse incrementally
+        seen = gradual_scroll_and_parse_incrementally(url, csv_filename, seen)
 
+        print(f"Scraped and saved {len(seen)} unique posts for {profile_name} to {csv_filename}")
 except Exception as e:
-    print(f"An unexpected error occurred during scraping: {e}")
-    # Optional: Save page source on error for debugging
-    # with open("error_page_source.html", "w", encoding="utf-8") as f:
-    #     f.write(driver.page_source)
+    print(f"Scraping failed: {e}. Possible block—try a proxy or manual check.")
 
-finally:
-    print("Closing browser.")
-    driver.quit()
+# Clean up
+driver.quit()

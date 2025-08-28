@@ -1,5 +1,4 @@
-https://www.linkedin.com/in/ken-cheng-991849b6/recent-activity/all/
-https://www.linkedin.com/in/tomhuntio/recent-activity/all/
-https://www.linkedin.com/in/roy-lee-goat/
-https://www.linkedin.com/in/natalie-corporate-natalie-0b634a231/
-http://linkedin.com/in/corporatebro/recent-activity/all/
+insert whoever you want to scrape here.
+
+format:
+https://www.linkedin.com/in/john-doe/recent-activity/all/
