@@ -1,4 +1,4 @@
-<h1 align="center">Link‑Scraper</h1>
+<h1 align="center">Link‑Scrape</h1>
 <p align="center"><em>Scrape lightly. Only what you’re allowed to see. Ethically.</em></p>
 
 <p align="center">
@@ -13,9 +13,9 @@
 
 ---
 
-## Why Link-Scraper?
+## Why Link-Scrape?
 
-Link-Scraper helps researchers, analysts, and builders collect publicly visible LinkedIn posts from profiles they already have access to. It’s designed to be:
+Link-Scrape helps researchers, analysts, and builders collect publicly visible LinkedIn posts from profiles they already have access to. It’s designed to be:
 
 - Lightweight and resilient
 - Human-in-the-loop (manual login, interactive controls)
